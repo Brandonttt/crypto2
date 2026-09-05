@@ -1,21 +1,147 @@
+import sys
+import types
+
+# ---------------------------------------------------------------------
+# PARCHE DE COMPATIBILIDAD PARA PYTHON 3.13 (imghdr shim para pgpy)
+# ---------------------------------------------------------------------
+if "imghdr" not in sys.modules:
+    imghdr_mock = types.ModuleType("imghdr")
+    imghdr_mock.what = lambda *args, **kwargs: None
+    sys.modules["imghdr"] = imghdr_mock
+
 import os
 import json
 import base64
 import hashlib
 import requests
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, scrolledtext
+from tkinter import ttk, messagebox, filedialog, scrolledtext, simpledialog
 
+# Librerías criptográficas
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding, hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding as asym_padding
 from cryptography.hazmat.backends import default_backend
 
+try:
+    import pgpy
+    PGPY_AVAILABLE = True
+except Exception:
+    PGPY_AVAILABLE = False
+
+
 # =====================================================================
-# MOTOR CRIPTOGRÁFICO
+# 1. GESTOR DUAL DE CLAVES Y FIRMAS (PEM Y OPENPGP/.ASC)
+# =====================================================================
+class KeyAdapter:
+    """Detecta y maneja indistintamente llaves RSA estándar (PEM) y OpenPGP (.asc)."""
+
+    @staticmethod
+    def load_private_key(raw_data: bytes, passphrase: str = None):
+        """Devuelve una tupla: ('PEM'|'PGP', objeto_clave)"""
+        text = raw_data.decode("utf-8", errors="ignore")
+
+        # Caso A: Archivo OpenPGP (.asc con BEGIN PGP PRIVATE KEY)
+        if "-----BEGIN PGP PRIVATE KEY" in text:
+            if not PGPY_AVAILABLE:
+                raise RuntimeError("El módulo pgpy no está disponible.")
+            key, _ = pgpy.PGPKey.from_blob(text)
+            if key.is_protected and passphrase:
+                key.unlock(passphrase)
+            return "PGP", key
+
+        # Caso B: Archivo PEM / RSA tradicional (incluso si está guardado con extensión .asc)
+        try:
+            pwd = passphrase.encode('utf-8') if passphrase else None
+            key = serialization.load_pem_private_key(raw_data, password=pwd, backend=default_backend())
+            return "PEM", key
+        except Exception as e:
+            # Reintento si era OpenPGP sin encabezado estricto
+            if PGPY_AVAILABLE:
+                try:
+                    key, _ = pgpy.PGPKey.from_blob(text)
+                    if key.is_protected and passphrase:
+                        key.unlock(passphrase)
+                    return "PGP", key
+                except Exception:
+                    pass
+            raise ValueError(f"No se pudo cargar la llave privada (ni como PEM ni como PGP): {e}")
+
+    @staticmethod
+    def load_public_key(raw_data: bytes):
+        """Devuelve una tupla: ('PEM'|'PGP', objeto_clave, etiqueta_identidad)"""
+        text = raw_data.decode("utf-8", errors="ignore")
+
+        # Caso OpenPGP
+        if "-----BEGIN PGP PUBLIC KEY" in text or ("PGP" in text and PGPY_AVAILABLE):
+            try:
+                key, _ = pgpy.PGPKey.from_blob(text)
+                uids = ", ".join([str(u) for u in key.userids]) if key.userids else "Clave PGP"
+                return "PGP", key, uids
+            except Exception:
+                pass
+
+        # Caso PEM estándar
+        try:
+            key = serialization.load_pem_public_key(raw_data, backend=default_backend())
+            return "PEM", key, "Clave Pública RSA (PEM)"
+        except Exception:
+            pass
+
+        # Fallback a PGP si falló PEM
+        if PGPY_AVAILABLE:
+            try:
+                key, _ = pgpy.PGPKey.from_blob(text)
+                uids = ", ".join([str(u) for u in key.userids]) if key.userids else "Clave PGP"
+                return "PGP", key, uids
+            except Exception:
+                pass
+
+        raise ValueError("El formato de la llave pública no es un PEM ni un PGP (.asc) válido.")
+
+    @staticmethod
+    def sign_payload(key_type: str, priv_key, data: bytes, passphrase: str = None) -> dict:
+        """Firma los bytes y devuelve dict con metadata del tipo de firma"""
+        if key_type == "PGP":
+            if priv_key.is_protected and passphrase:
+                with priv_key.unlock(passphrase):
+                    sig = priv_key.sign(data)
+            else:
+                sig = priv_key.sign(data)
+            return {"type": "PGP", "signature": str(sig)}
+        else:
+            sig = priv_key.sign(
+                data,
+                asym_padding.PSS(asym_padding.MGF1(hashes.SHA256()), asym_padding.PSS.MAX_LENGTH),
+                hashes.SHA256()
+            )
+            return {"type": "PEM", "signature": base64.b64encode(sig).decode()}
+
+    @staticmethod
+    def verify_payload(key_type: str, pub_key, sig_data: dict, data: bytes) -> bool:
+        """Verifica la firma según el formato almacenado"""
+        try:
+            sig_type = sig_data.get("type", key_type)
+            if sig_type == "PGP":
+                sig_obj = pgpy.PGPSignature.from_blob(sig_data["signature"])
+                return bool(pub_key.verify(data, sig_obj))
+            else:
+                raw_sig = base64.b64decode(sig_data["signature"])
+                pub_key.verify(
+                    raw_sig,
+                    data,
+                    asym_padding.PSS(asym_padding.MGF1(hashes.SHA256()), asym_padding.PSS.MAX_LENGTH),
+                    hashes.SHA256()
+                )
+                return True
+        except Exception:
+            return False
+
+
+# =====================================================================
+# 2. MOTOR DIFFIE-HELLMAN Y AES-CBC
 # =====================================================================
 class CryptoEngine:
-    # Grupo 14 RFC 3526 (2048 bits)
     DH_P = int(
         "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74"
         "020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F1437"
@@ -38,8 +164,7 @@ class CryptoEngine:
     def compute_dh_key(their_pub, my_priv, length=16):
         shared_int = pow(their_pub, my_priv, CryptoEngine.DH_P)
         shared_bytes = shared_int.to_bytes((shared_int.bit_length() + 7) // 8, 'big')
-        digest = hashlib.sha256(shared_bytes).digest()
-        return digest[:length]
+        return hashlib.sha256(shared_bytes).digest()[:length]
 
     @staticmethod
     def encrypt_aes_cbc(plaintext: bytes, key: bytes, iv: bytes) -> bytes:
@@ -55,45 +180,23 @@ class CryptoEngine:
         unpadder = padding.PKCS7(128).unpadder()
         return unpadder.update(padded) + unpadder.finalize()
 
-    @staticmethod
-    def generate_rsa_keypair():
-        priv = rsa.generate_private_key(65537, 2048, default_backend())
-        return priv, priv.public_key()
-
-    @staticmethod
-    def sign(priv_key, data: bytes) -> bytes:
-        return priv_key.sign(
-            data,
-            asym_padding.PSS(asym_padding.MGF1(hashes.SHA256()), asym_padding.PSS.MAX_LENGTH),
-            hashes.SHA256()
-        )
-
-    @staticmethod
-    def verify(pub_key, signature: bytes, data: bytes) -> bool:
-        try:
-            pub_key.verify(
-                signature,
-                data,
-                asym_padding.PSS(asym_padding.MGF1(hashes.SHA256()), asym_padding.PSS.MAX_LENGTH),
-                hashes.SHA256()
-            )
-            return True
-        except Exception:
-            return False
-
 
 # =====================================================================
-# APLICACIÓN GRÁFICA
+# 3. INTERFAZ GRÁFICA
 # =====================================================================
 class MainApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Criptografía Híbrida - Sistema Integral")
-        self.geometry("980x750")
+        self.title("Criptografía Híbrida - Soporte Dual (.pem / .asc)")
+        self.geometry("980x760")
 
-        # Estado local de claves RSA
-        self.rsa_priv = None
-        self.rsa_pub = None
+        self.priv_key_type = None
+        self.loaded_priv_key = None
+        self.priv_passphrase = None
+
+        self.pub_key_type = None
+        self.loaded_pub_key = None
+        self.pub_key_label = "No cargada"
 
         self._init_ui()
 
@@ -105,79 +208,93 @@ class MainApp(tk.Tk):
         self.tab_sender = ttk.Frame(notebook)
         self.tab_receiver = ttk.Frame(notebook)
 
-        notebook.add(self.tab_keys, text="Gestión de Identidad y Claves RSA")
-        notebook.add(self.tab_sender, text="Emisor: Cifrado y Firma (Alicia / Candy)")
-        notebook.add(self.tab_receiver, text="Receptor: Descifrado y Verificación (Betito)")
+        notebook.add(self.tab_keys, text="1. Gestión de Llaves (.pem / .asc)")
+        notebook.add(self.tab_sender, text="2. Emisor: Alicia / Candy")
+        notebook.add(self.tab_receiver, text="3. Receptor: Betito")
 
         self._build_tab_keys()
         self._build_tab_sender()
         self._build_tab_receiver()
 
-    # -------------------------------------------------------------
-    # Pestaña 1: Claves RSA
-    # -------------------------------------------------------------
     def _build_tab_keys(self):
-        f = ttk.LabelFrame(self.tab_keys, text=" Generador de Identidad Digital (RSA 2048) ", padding=15)
+        f = ttk.LabelFrame(self.tab_keys, text=" Carga o Generación de Identidad ", padding=15)
         f.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
 
-        ttk.Label(f, text="Genera tu par de claves para identificarte como Alicia, Candy o Betito:").pack(anchor=tk.W, pady=5)
+        ttk.Label(f, text="El sistema acepta cualquier llave privada o pública en formato .pem o .asc (PGP/RSA):").pack(anchor=tk.W, pady=5)
         
         btn_box = ttk.Frame(f)
         btn_box.pack(anchor=tk.W, pady=10)
-        ttk.Button(btn_box, text="Generar Nuevo Par RSA", command=self.action_gen_rsa).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_box, text="Exportar Llave Pública (.pem)", command=self.action_save_pub).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_box, text="Exportar Llave Privada (.pem)", command=self.action_save_priv).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_box, text="Cargar Llave Privada (.pem)", command=self.action_load_priv).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_box, text="📂 Cargar Llave Privada (.pem o .asc)", command=self.action_load_priv).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_box, text="⚙ Generar Nueva RSA (PEM)", command=self.action_gen_rsa).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_box, text="💾 Exportar Clave Pública", command=self.action_export_pub).pack(side=tk.LEFT, padx=5)
 
-        self.txt_keys_info = scrolledtext.ScrolledText(f, height=18, font=("Consolas", 9))
-        self.txt_keys_info.pack(fill=tk.BOTH, expand=True, pady=10)
+        self.lbl_priv_status = ttk.Label(f, text="Llave Privada: No cargada", foreground="red", font=("Segoe UI", 9, "bold"))
+        self.lbl_priv_status.pack(anchor=tk.W, pady=5)
+
+        self.txt_key_details = scrolledtext.ScrolledText(f, height=18, font=("Consolas", 9))
+        self.txt_key_details.pack(fill=tk.BOTH, expand=True, pady=10)
+
+    def action_load_priv(self):
+        path = filedialog.askopenfilename(filetypes=[("Claves Privadas", "*.pem;*.asc;*.key;*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+
+            passphrase = None
+            text = data.decode("utf-8", errors="ignore")
+            if "ENCRYPTED" in text or ("PGP" in text and "BEGIN PGP PRIVATE KEY" in text):
+                passphrase = simpledialog.askstring("Contraseña requerida", "Introduce la contraseña/passphrase de tu llave (deja vacío si no tiene):", show='*')
+
+            ktype, key = KeyAdapter.load_private_key(data, passphrase)
+            self.priv_key_type = ktype
+            self.loaded_priv_key = key
+            self.priv_passphrase = passphrase
+
+            desc = f"Formato {ktype} detectado"
+            if ktype == "PGP" and getattr(key, 'userids', None):
+                desc += f" ({key.userids[0]})"
+            self.lbl_priv_status.config(text=f"Llave Privada: Activa [{desc}]", foreground="green")
+
+            self.txt_key_details.delete("1.0", tk.END)
+            self.txt_key_details.insert(tk.END, f"[✓] Llave privada cargada con éxito.\nFormato: {ktype}\nArchivo: {os.path.basename(path)}\n\n")
+            messagebox.showinfo("Éxito", f"Llave privada ({ktype}) lista para firmar.")
+        except Exception as e:
+            messagebox.showerror("Error de Llave", f"No se pudo cargar la llave privada:\n{e}")
 
     def action_gen_rsa(self):
-        self.rsa_priv, self.rsa_pub = CryptoEngine.generate_rsa_keypair()
-        pub_pem = self.rsa_pub.public_bytes(
+        priv = rsa.generate_private_key(65537, 2048, default_backend())
+        self.priv_key_type = "PEM"
+        self.loaded_priv_key = priv
+        self.priv_passphrase = None
+        self.lbl_priv_status.config(text="Llave Privada: Nueva RSA 2048 generada en memoria", foreground="green")
+        
+        pub_pem = priv.public_key().public_bytes(
             serialization.Encoding.PEM,
             serialization.PublicFormat.SubjectPublicKeyInfo
         ).decode()
-        self.txt_keys_info.delete("1.0", tk.END)
-        self.txt_keys_info.insert(tk.END, "[✓] Par de claves RSA 2048 generado correctamente.\n\n")
-        self.txt_keys_info.insert(tk.END, "--- CLAVE PÚBLICA (Para subir a la web/drive) ---\n" + pub_pem)
-        messagebox.showinfo("Éxito", "Claves RSA listas en memoria. Exporta tu clave pública para compartirla.")
+        self.txt_key_details.delete("1.0", tk.END)
+        self.txt_key_details.insert(tk.END, "--- CLAVE PÚBLICA PEM ASOCIADA ---\n" + pub_pem)
+        messagebox.showinfo("Generada", "Nueva clave generada.")
 
-    def action_save_pub(self):
-        if not self.rsa_pub:
-            messagebox.showwarning("Aviso", "Primero genera un par de claves.")
+    def action_export_pub(self):
+        if not self.loaded_priv_key:
+            messagebox.showwarning("Aviso", "No hay llave activa.")
             return
-        path = filedialog.asksaveasfilename(defaultextension=".pem", filetypes=[("PEM Files", "*.pem")])
+        path = filedialog.asksaveasfilename(defaultextension=".pem", filetypes=[("Archivos PEM/ASC", "*.pem;*.asc")])
         if path:
-            pem = self.rsa_pub.public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
-            with open(path, "wb") as f: f.write(pem)
-            messagebox.showinfo("Guardado", f"Clave pública exportada en:\n{path}")
+            if self.priv_key_type == "PEM":
+                pub_bytes = self.loaded_priv_key.public_key().public_bytes(
+                    serialization.Encoding.PEM,
+                    serialization.PublicFormat.SubjectPublicKeyInfo
+                )
+            else:
+                pub_bytes = str(self.loaded_priv_key.pubkey).encode('utf-8')
+            with open(path, "wb") as f:
+                f.write(pub_bytes)
+            messagebox.showinfo("Exportada", f"Clave guardada en: {path}")
 
-    def action_save_priv(self):
-        if not self.rsa_priv:
-            messagebox.showwarning("Aviso", "Primero genera un par de claves.")
-            return
-        path = filedialog.asksaveasfilename(defaultextension=".pem", filetypes=[("PEM Files", "*.pem")])
-        if path:
-            pem = self.rsa_priv.private_bytes(
-                serialization.Encoding.PEM,
-                serialization.PrivateFormat.PKCS8,
-                serialization.NoEncryption()
-            )
-            with open(path, "wb") as f: f.write(pem)
-            messagebox.showinfo("Guardado", f"Clave privada exportada en:\n{path}")
-
-    def action_load_priv(self):
-        path = filedialog.askopenfilename(filetypes=[("PEM Files", "*.pem")])
-        if path:
-            with open(path, "rb") as f:
-                self.rsa_priv = serialization.load_pem_private_key(f.read(), password=None, backend=default_backend())
-                self.rsa_pub = self.rsa_priv.public_key()
-            messagebox.showinfo("Cargado", "Clave privada cargada con éxito en memoria.")
-
-    # -------------------------------------------------------------
-    # Pestaña 2: Emisor (Alicia / Candy)
-    # -------------------------------------------------------------
     def _build_tab_sender(self):
         f = ttk.Frame(self.tab_sender, padding=15)
         f.pack(fill=tk.BOTH, expand=True)
@@ -185,126 +302,102 @@ class MainApp(tk.Tk):
         self.send_cipher = tk.BooleanVar(value=True)
         self.send_sign = tk.BooleanVar(value=True)
 
-        opts = ttk.LabelFrame(f, text=" 1. Selección de Servicios ", padding=10)
+        opts = ttk.LabelFrame(f, text=" 1. Servicios a Ofrecer ", padding=10)
         opts.pack(fill=tk.X, pady=5)
-        ttk.Checkbutton(opts, text="Cifrado (Confidencialidad vía DH + AES-CBC)", variable=self.send_cipher).pack(side=tk.LEFT, padx=15)
-        ttk.Checkbutton(opts, text="Firma Digital (Autenticación, Integridad, No Repudio vía RSA)", variable=self.send_sign).pack(side=tk.LEFT, padx=15)
+        ttk.Checkbutton(opts, text="Confidencialidad (Diffie-Hellman + AES-CBC)", variable=self.send_cipher).pack(side=tk.LEFT, padx=15)
+        ttk.Checkbutton(opts, text="Firma Digital (Autenticación, Integridad y No Repudio)", variable=self.send_sign).pack(side=tk.LEFT, padx=15)
 
         msg_box = ttk.LabelFrame(f, text=" 2. Mensaje en Claro (m) ", padding=10)
         msg_box.pack(fill=tk.X, pady=5)
         self.txt_sender_msg = ttk.Entry(msg_box, font=("Segoe UI", 10))
-        self.txt_sender_msg.insert(0, "Hola Betito, este es un mensaje auténtico y confidencial.")
+        self.txt_sender_msg.insert(0, "Mensaje secreto de prueba para Betito.")
         self.txt_sender_msg.pack(fill=tk.X)
 
-        btn_run = ttk.Button(f, text="🔒 Ejecutar y Guardar Archivo Criptográfico para la Nube", command=self.action_process_and_save)
-        btn_run.pack(pady=10)
+        ttk.Button(f, text="🔒 Ejecutar y Guardar Archivo Criptográfico para la Nube", command=self.action_send).pack(pady=10)
 
-        log_box = ttk.LabelFrame(f, text=" Bitácora del Proceso (Servicios y Operaciones) ", padding=10)
+        log_box = ttk.LabelFrame(f, text=" Bitácora del Emisor ", padding=10)
         log_box.pack(fill=tk.BOTH, expand=True, pady=5)
         self.txt_sender_log = scrolledtext.ScrolledText(log_box, height=12, font=("Consolas", 9))
         self.txt_sender_log.pack(fill=tk.BOTH, expand=True)
 
-    def action_process_and_save(self):
+    def action_send(self):
         self.txt_sender_log.delete("1.0", tk.END)
         do_c = self.send_cipher.get()
         do_s = self.send_sign.get()
 
         if not do_c and not do_s:
-            messagebox.showwarning("Error", "Seleccione al menos un servicio.")
+            messagebox.showwarning("Error", "Selecciona al menos un servicio.")
             return
 
-        if do_s and not self.rsa_priv:
-            messagebox.showerror("Error", "Para firmar debe generar o cargar su llave privada en la pestaña 'Gestión de Claves'.")
+        if do_s and not self.loaded_priv_key:
+            messagebox.showerror("Error", "Carga tu llave privada (.pem o .asc) en la Pestaña 1 para firmar.")
             return
 
         msg_bytes = self.txt_sender_msg.get().strip().encode('utf-8')
-        if not msg_bytes:
-            messagebox.showwarning("Error", "El mensaje no puede estar vacío.")
-            return
-
-        self.txt_sender_log.insert(tk.END, "[*] Iniciando procesamiento del mensaje...\n")
-        
         packet = {"cipher_active": do_c, "sign_active": do_s}
 
-        # Diffie-Hellman simulando acuerdo con Betito
+        # Confidencialidad
         if do_c:
-            self.txt_sender_log.insert(tk.END, "[+] Servicio: CONFIDENCIALIDAD activado.\n")
-            # Ronda K
+            self.txt_sender_log.insert(tk.END, "[+] Servicio: CONFIDENCIALIDAD\n")
             a, Ka = CryptoEngine.generate_dh_pair()
             b, Kb = CryptoEngine.generate_dh_pair()
             k_session = CryptoEngine.compute_dh_key(Kb, a, 16)
 
-            # Ronda IV
             c, Kc = CryptoEngine.generate_dh_pair()
             d, Kd = CryptoEngine.generate_dh_pair()
             iv_session = CryptoEngine.compute_dh_key(Kd, c, 16)
 
             ciphertext = CryptoEngine.encrypt_aes_cbc(msg_bytes, k_session, iv_session)
-            
-            # Guardamos datos de sesión para que el receptor pueda derivar la misma clave
             packet["dh_Ka"] = str(Ka)
-            packet["dh_b_simulated"] = str(b)  # Permite al receptor calcular K = Ka^b mod n
+            packet["dh_b_simulated"] = str(b)
             packet["dh_Kc"] = str(Kc)
-            packet["dh_d_simulated"] = str(d)  # Permite al receptor calcular IV = Kc^d mod n
+            packet["dh_d_simulated"] = str(d)
             packet["payload"] = base64.b64encode(ciphertext).decode()
-
-            self.txt_sender_log.insert(tk.END, f"    - Ronda DH (K): Ka y Kb intercambiados. K derivada.\n")
-            self.txt_sender_log.insert(tk.END, f"    - Ronda DH (IV): Kc y Kd intercambiados. IV derivado.\n")
-            self.txt_sender_log.insert(tk.END, f"    - Cifrado AES-CBC completado ({len(ciphertext)} bytes).\n")
+            self.txt_sender_log.insert(tk.END, f"    - Diffie-Hellman completado para K e IV.\n    - Cifrado AES-CBC generado ({len(ciphertext)} bytes).\n")
         else:
             packet["payload"] = base64.b64encode(msg_bytes).decode()
-            self.txt_sender_log.insert(tk.END, "[i] Confidencialidad NO seleccionada: el texto viaja en claro.\n")
+            self.txt_sender_log.insert(tk.END, "[i] Texto en claro sin cifrar.\n")
 
-        # Firma RSA
+        # Firma
         if do_s:
-            self.txt_sender_log.insert(tk.END, "[+] Servicios: AUTENTICACIÓN, INTEGRIDAD Y NO REPUDIO activados.\n")
-            sig = CryptoEngine.sign(self.rsa_priv, msg_bytes)
-            packet["signature"] = base64.b64encode(sig).decode()
-            self.txt_sender_log.insert(tk.END, f"    - Hash SHA-256 generado y firmado con RSA privada.\n")
-            self.txt_sender_log.insert(tk.END, f"    - Firma digital adjunta: {sig.hex()[:30]}...\n")
+            self.txt_sender_log.insert(tk.END, f"[+] Servicio: FIRMA DIGITAL ({self.priv_key_type})\n")
+            sig_dict = KeyAdapter.sign_payload(self.priv_key_type, self.loaded_priv_key, msg_bytes, self.priv_passphrase)
+            packet["sig_data"] = sig_dict
+            self.txt_sender_log.insert(tk.END, "    - Hash SHA-256 generado y firmado con éxito.\n")
 
-        # Guardar en archivo
-        path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("Crypto Package", "*.json;*.bin;*.txt")])
+        path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("Paquete JSON", "*.json;*.bin")])
         if path:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(packet, f, indent=2)
-            self.txt_sender_log.insert(tk.END, f"\n[✓] Paquete guardado con éxito en: {path}\n")
-            self.txt_sender_log.insert(tk.END, "[✓] LISTO PARA SUBIR A LA NUBE (Google Drive).\n")
-            messagebox.showinfo("Completado", "Archivo generado. Ya puedes subirlo a Drive.")
+            self.txt_sender_log.insert(tk.END, f"\n[✓] Paquete guardado para la nube: {path}\n")
+            messagebox.showinfo("Listo", "Archivo generado para subir a Google Drive.")
 
-    # -------------------------------------------------------------
-    # Pestaña 3: Receptor (Betito)
-    # -------------------------------------------------------------
     def _build_tab_receiver(self):
         f = ttk.Frame(self.tab_receiver, padding=15)
         f.pack(fill=tk.BOTH, expand=True)
 
-        load_box = ttk.LabelFrame(f, text=" 1. Cargar Archivo de la Nube (x, y, z) ", padding=10)
+        load_box = ttk.LabelFrame(f, text=" 1. Archivo Descargado de la Nube (x, y, z) ", padding=10)
         load_box.pack(fill=tk.X, pady=5)
-        
-        btn_row1 = ttk.Frame(load_box)
-        btn_row1.pack(fill=tk.X)
-        ttk.Button(btn_row1, text="Seleccionar Archivo Local Descargado de Drive", command=self.action_load_cloud_file).pack(side=tk.LEFT, padx=5)
-        self.lbl_cloud_file = ttk.Label(btn_row1, text="Ningún archivo seleccionado", foreground="gray")
+        ttk.Button(load_box, text="📂 Seleccionar Archivo Local", command=self.action_load_file).pack(side=tk.LEFT, padx=5)
+        self.lbl_cloud_file = ttk.Label(load_box, text="Ningún archivo seleccionado", foreground="gray")
         self.lbl_cloud_file.pack(side=tk.LEFT, padx=10)
 
-        web_box = ttk.LabelFrame(f, text=" 2. Obtención de Llave Pública del Autor (Descarga Web Requerida) ", padding=10)
+        web_box = ttk.LabelFrame(f, text=" 2. Llave Pública (.pem o .asc) ", padding=10)
         web_box.pack(fill=tk.X, pady=5)
 
         url_row = ttk.Frame(web_box)
         url_row.pack(fill=tk.X, pady=3)
-        ttk.Label(url_row, text="URL Llave Pública:").pack(side=tk.LEFT, padx=5)
+        ttk.Label(url_row, text="URL Web:").pack(side=tk.LEFT, padx=5)
         self.txt_pub_url = ttk.Entry(url_row, width=50)
-        self.txt_pub_url.insert(0, "https://raw.githubusercontent.com/.../alicia_public.pem")
+        self.txt_pub_url.insert(0, "https://gist.githubusercontent.com/.../raw/clave.asc")
         self.txt_pub_url.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        ttk.Button(url_row, text="🌐 Descargar de la Web", command=self.action_download_pub_web).pack(side=tk.LEFT, padx=5)
+        ttk.Button(url_row, text="🌐 Descargar de la Web", command=self.action_download_web_pub).pack(side=tk.LEFT, padx=5)
 
-        ttk.Button(web_box, text="O cargar llave pública desde archivo local", command=self.action_load_pub_file).pack(anchor=tk.W, padx=5, pady=3)
+        ttk.Button(web_box, text="📂 O cargar llave pública desde archivo local", command=self.action_load_local_pub).pack(anchor=tk.W, padx=5, pady=3)
         self.lbl_pub_status = ttk.Label(web_box, text="Llave pública: No cargada", foreground="red")
         self.lbl_pub_status.pack(anchor=tk.W, padx=5)
 
-        btn_verify = ttk.Button(f, text="🔓 Descifrar y Verificar Identidad / Integridad", command=self.action_decrypt_and_verify)
-        btn_verify.pack(pady=10)
+        ttk.Button(f, text="🔓 Descifrar y Verificar Autoría e Integridad", command=self.action_decrypt_verify).pack(pady=10)
 
         res_box = ttk.LabelFrame(f, text=" Resultados de Verificación y Contenido ", padding=10)
         res_box.pack(fill=tk.BOTH, expand=True, pady=5)
@@ -312,57 +405,64 @@ class MainApp(tk.Tk):
         self.txt_receiver_log.pack(fill=tk.BOTH, expand=True)
 
         self.loaded_packet = None
-        self.received_pub_key = None
 
-    def action_load_cloud_file(self):
-        path = filedialog.askopenfilename(filetypes=[("Archivos de paquete", "*.json;*.bin;*.txt;*.*")])
+    def action_load_file(self):
+        path = filedialog.askopenfilename(filetypes=[("Paquetes", "*.json;*.bin;*.*")])
         if path:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     self.loaded_packet = json.load(f)
                 self.lbl_cloud_file.config(text=os.path.basename(path), foreground="black")
-                messagebox.showinfo("Cargado", f"Archivo cargado: {os.path.basename(path)}")
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo leer el archivo: {e}")
 
-    def action_download_pub_web(self):
+    def action_download_web_pub(self):
         url = self.txt_pub_url.get().strip()
         if not url:
-            messagebox.showwarning("Error", "Proporcione la URL de la clave pública.")
+            messagebox.showwarning("Error", "Introduce la URL de la llave pública.")
             return
         try:
             r = requests.get(url, timeout=5)
             r.raise_for_status()
-            self.received_pub_key = serialization.load_pem_public_key(r.content, backend=default_backend())
-            self.lbl_pub_status.config(text="Llave pública descargada exitosamente vía Web", foreground="green")
-            messagebox.showinfo("Éxito", "Clave pública descargada y parseada desde la Web.")
+            ktype, pub_key, uids = KeyAdapter.load_public_key(r.content)
+            self.pub_key_type = ktype
+            self.loaded_pub_key = pub_key
+            self.pub_key_label = uids
+            self.lbl_pub_status.config(text=f"Llave web cargada [{ktype}]: {uids}", foreground="green")
+            messagebox.showinfo("Éxito", f"Llave pública ({ktype}) descargada correctamente.")
         except Exception as e:
-            messagebox.showerror("Error de Red/Formato", f"Fallo al descargar la clave:\n{e}")
+            messagebox.showerror("Error de Descarga Web", f"No se pudo procesar la llave desde la URL:\n{e}")
 
-    def action_load_pub_file(self):
-        path = filedialog.askopenfilename(filetypes=[("PEM Files", "*.pem")])
+    def action_load_local_pub(self):
+        path = filedialog.askopenfilename(filetypes=[("Llaves Públicas", "*.pem;*.asc;*.pub;*.*")])
         if path:
-            with open(path, "rb") as f:
-                self.received_pub_key = serialization.load_pem_public_key(f.read(), backend=default_backend())
-            self.lbl_pub_status.config(text=f"Llave local cargada: {os.path.basename(path)}", foreground="green")
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+                ktype, pub_key, uids = KeyAdapter.load_public_key(data)
+                self.pub_key_type = ktype
+                self.loaded_pub_key = pub_key
+                self.pub_key_label = uids
+                self.lbl_pub_status.config(text=f"Llave local cargada [{ktype}]: {uids}", foreground="green")
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo cargar la llave pública:\n{e}")
 
-    def action_decrypt_and_verify(self):
+    def action_decrypt_verify(self):
         self.txt_receiver_log.delete("1.0", tk.END)
         if not self.loaded_packet:
-            messagebox.showwarning("Error", "Cargue primero el archivo de la nube.")
+            messagebox.showwarning("Error", "Carga primero el archivo de la nube.")
             return
-
-        self.txt_receiver_log.insert(tk.END, "========================================================\n")
-        self.txt_receiver_log.insert(tk.END, "             INSPECCIÓN Y RECEPCIÓN DE BETITO           \n")
-        self.txt_receiver_log.insert(tk.END, "========================================================\n")
 
         p = self.loaded_packet
         payload_bytes = base64.b64decode(p["payload"])
         decrypted_m = None
 
-        # 1. DESCIFRADO
+        self.txt_receiver_log.insert(tk.END, "========================================================\n")
+        self.txt_receiver_log.insert(tk.END, "           VERIFICACIÓN EN RECEPTOR (BETITO)            \n")
+        self.txt_receiver_log.insert(tk.END, "========================================================\n")
+
+        # 1. Descifrado
         if p.get("cipher_active", False):
-            self.txt_receiver_log.insert(tk.END, "[*] Procesando Confidencialidad (Diffie-Hellman + AES-CBC)...\n")
             try:
                 Ka = int(p["dh_Ka"])
                 b = int(p["dh_b_simulated"])
@@ -373,38 +473,40 @@ class MainApp(tk.Tk):
                 iv_session = CryptoEngine.compute_dh_key(Kc, d, 16)
 
                 decrypted_m = CryptoEngine.decrypt_aes_cbc(payload_bytes, k_session, iv_session)
-                self.txt_receiver_log.insert(tk.END, f"[✓] Confidencialidad garantizada: AES-CBC descifrado con éxito.\n")
+                self.txt_receiver_log.insert(tk.END, "[✓] CONFIDENCIALIDAD: Descifrado Diffie-Hellman + AES exitoso.\n")
             except Exception as e:
                 self.txt_receiver_log.insert(tk.END, f"[X] Error crítico al descifrar: {e}\n")
                 messagebox.showerror("Fallo de Descifrado", "No se pudo descifrar el criptograma.")
                 return
         else:
             decrypted_m = payload_bytes
-            self.txt_receiver_log.insert(tk.END, "[i] El archivo no incluye capa de confidencialidad.\n")
+            self.txt_receiver_log.insert(tk.END, "[i] Archivo en texto claro.\n")
 
-        # 2. VERIFICACIÓN DE IDENTIDAD E INTEGRIDAD
+        # 2. Verificación de Firma
         if p.get("sign_active", False):
-            self.txt_receiver_log.insert(tk.END, "\n[*] Procesando Verificación de Firma RSA...\n")
-            if not self.received_pub_key:
-                self.txt_receiver_log.insert(tk.END, "[!] Advertencia: Debe descargar la llave pública del supuesto autor.\n")
-                messagebox.showwarning("Falta Llave", "Descargue o cargue la llave pública para validar el autor.")
+            if not self.loaded_pub_key:
+                messagebox.showwarning("Llave Faltante", "Descarga de la web la llave pública del autor.")
                 return
 
-            sig = base64.b64decode(p["signature"])
-            is_valid = CryptoEngine.verify(self.received_pub_key, sig, decrypted_m)
+            sig_data = p.get("sig_data", {})
+            # Retrocompatibilidad con formato anterior si existía
+            if not sig_data and "signature_asc" in p:
+                sig_data = {"type": "PGP", "signature": p["signature_asc"]}
+
+            is_valid = KeyAdapter.verify_payload(self.pub_key_type, self.loaded_pub_key, sig_data, decrypted_m)
 
             if is_valid:
-                self.txt_receiver_log.insert(tk.END, "[✓] VERIFICACIÓN EXITOSA (Hash coincide = )\n")
-                self.txt_receiver_log.insert(tk.END, "    ➔ AUTENTICACIÓN: El autor posee la clave privada correspondiente.\n")
-                self.txt_receiver_log.insert(tk.END, "    ➔ INTEGRIDAD: El mensaje no ha sufrido ninguna modificación.\n")
-                self.txt_receiver_log.insert(tk.END, "    ➔ NO REPUDIO: El autor no puede negar haber emitido este mensaje.\n")
-                messagebox.showinfo("Verificación Positiva", "Firma válida: Identidad e Integridad confirmadas.")
+                self.txt_receiver_log.insert(tk.END, "[✓] VERIFICACIÓN EXITOSA (Firma válida = )\n")
+                self.txt_receiver_log.insert(tk.END, f"    ➔ AUTOR CONFIRMADO: {self.pub_key_label}\n")
+                self.txt_receiver_log.insert(tk.END, "    ➔ INTEGRIDAD: El mensaje no ha sido alterado.\n")
+                self.txt_receiver_log.insert(tk.END, "    ➔ NO REPUDIO: Vinculación estricta con el firmante.\n")
+                messagebox.showinfo("Verificación Válida", f"Autor confirmado: {self.pub_key_label}\nIntegridad garantizada.")
             else:
-                self.txt_receiver_log.insert(tk.END, "[X] VERIFICACIÓN FALLIDA (Hash NO coincide != )\n")
-                self.txt_receiver_log.insert(tk.END, "    ➔ ALERTA DE INTEGRIDAD: El archivo fue alterado o la llave pública no corresponde al autor.\n")
-                messagebox.showerror("Fallo de Integridad / Firma", "La firma NO coincide. El archivo fue manipulado o la llave pública es incorrecta.")
+                self.txt_receiver_log.insert(tk.END, "[X] VERIFICACIÓN FALLIDA (Firma inválida != )\n")
+                self.txt_receiver_log.insert(tk.END, "    ➔ ALERTA DE INTEGRIDAD: El mensaje fue alterado o la llave pública no es la del autor.\n")
+                messagebox.showerror("Fallo de Verificación", "¡Alerta! La firma no coincide con la llave pública probada.")
         else:
-            self.txt_receiver_log.insert(tk.END, "[i] El archivo no incluye firma digital.\n")
+            self.txt_receiver_log.insert(tk.END, "[i] Archivo sin firma digital.\n")
 
         self.txt_receiver_log.insert(tk.END, "\n--------------------------------------------------------\n")
         self.txt_receiver_log.insert(tk.END, f"CONTENIDO DEL MENSAJE:\n{decrypted_m.decode('utf-8', errors='replace')}\n")
