@@ -1,11 +1,13 @@
 import os
+import re
 import json
 import base64
 import hashlib
+import requests
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, scrolledtext, simpledialog
+from tkinter import ttk, messagebox, filedialog, scrolledtext
 
-# Criptografía estándar
+# Criptografía estándar en Python
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding, hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding as asym_padding
@@ -13,40 +15,47 @@ from cryptography.hazmat.backends import default_backend
 
 
 # =====================================================================
-# 1. PARSER AUTÓNOMO DE OPENPGP (.ASC) EN PYTHON PURO
+# 1. PARSER AUTÓNOMO OPENPGP / GPG (.ASC) EN PYTHON PURO
 # =====================================================================
-class OpenPGPParser:
-    """Extrae paquetes OpenPGP (RFC 4880) sin requerir gpg.exe ni librerías externas."""
+class OpenPGPAnalyzer:
+    """Extrae UID y calcula el Key-ID único del módulo RSA de cualquier llave .asc o .pem."""
 
     @staticmethod
-    def extract_uid(asc_text: str) -> str:
-        import re
-
-        # 1. Búsqueda directa en texto plano (cubre llaves exportadas con comentario o metadatos)
-        text_matches = re.findall(r'([A-Za-zÁÉÍÓÚáéíóúñÑ0-9\s._-]+<[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+>)', asc_text)
+    def analyze(content: str):
+        # 1. Extraer User ID (Nombre y Correo)
+        uid = None
+        # Búsqueda por regex de correo
+        text_matches = re.findall(r'([A-Za-zÁÉÍÓÚáéíóúñÑ0-9\s._-]+<[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+>)', content)
         if text_matches:
-            return text_matches[0].strip()
+            uid = text_matches[0].strip()
 
-        # 2. Búsqueda en el payload binario decodificado de Base64
+        # 2. Si no viene en claro, buscar en los paquetes decodificados
+        clean_lines = [l.strip() for l in content.splitlines() if l.strip() and not l.startswith("---") and not l.startswith("=") and ":" not in l]
+        b64_str = "".join(clean_lines)
+
         try:
-            lines = [l.strip() for l in asc_text.splitlines() if l.strip() and not l.startswith("---") and not l.startswith("=") and ":" not in l]
-            raw = base64.b64decode("".join(lines))
-            
-            # Buscar patrones legibles de correo o nombre completo
-            mail_pattern = re.compile(rb'([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)')
-            m = mail_pattern.search(raw)
-            if m:
-                # Delimitar hacia atrás para capturar el nombre
-                start = max(0, m.start() - 60)
-                chunk = raw[start : m.end() + 1]
-                # Buscar inicio de caracteres legibles
-                printable = re.search(rb'[A-Za-z][A-Za-z0-9\s._-]*<[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]*>?', chunk)
-                if printable:
-                    return printable.group(0).decode('utf-8', errors='ignore').strip()
-        except Exception:
-            pass
+            raw = base64.b64decode(b64_str)
+            if not uid:
+                m = re.search(rb'([A-Za-z0-9\s._-]+<[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+>)', raw)
+                if m:
+                    uid = m.group(1).decode('utf-8', errors='ignore').strip()
 
-        return "Usuario OpenPGP / GPG Certificado"
+            # Extraer módulo RSA para cálculo de Key ID único
+            pos = 9
+            n_bits = (raw[pos] << 8) | raw[pos+1]
+            n_bytes = (n_bits + 7) // 8
+            pos += 2
+            n_val = raw[pos : pos + n_bytes]
+            key_id = hashlib.sha256(n_val).hexdigest()[:16].upper()
+        except Exception:
+            key_id = hashlib.sha256(content.encode('utf-8')).hexdigest()[:16].upper()
+
+        if not uid:
+            uid = f"Usuario_GPG_{key_id[:8]}"
+
+        return uid, key_id
+
+
 # =====================================================================
 # 2. MOTOR DIFFIE-HELLMAN Y AES-CBC
 # =====================================================================
@@ -91,25 +100,25 @@ class CryptoEngine:
 
 
 # =====================================================================
-# 3. APLICACIÓN GRÁFICA COMPLETA
+# 3. INTERFAZ GRÁFICA PRINCIPAL
 # =====================================================================
 class MainApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Criptografía Híbrida - Protocolo Oficial")
+        self.title("Práctica Criptografía Híbrida - Protocolo Oficial")
         self.geometry("980x760")
 
-        # Clave interna RSA para firmas criptográficas certificadas
-        self._internal_priv = rsa.generate_private_key(65537, 2048, default_backend())
-        self._internal_pub = self._internal_priv.public_key()
+        # Par asimétrico interno vinculado a la sesión
+        self.internal_priv = rsa.generate_private_key(65537, 2048, default_backend())
+        self.internal_pub = self.internal_priv.public_key()
 
-        # Datos de la llave cargada
-        self.identity_uid = None
-        self.loaded_asc_text = None
+        # Datos de emisor
+        self.priv_identity = None
+        self.priv_key_id = None
 
-        # Datos en receptor
-        self.pub_asc_text = None
+        # Datos de receptor (Betito)
         self.pub_identity = None
+        self.pub_key_id = None
 
         self._init_ui()
 
@@ -121,7 +130,7 @@ class MainApp(tk.Tk):
         self.tab_sender = ttk.Frame(notebook)
         self.tab_receiver = ttk.Frame(notebook)
 
-        notebook.add(self.tab_keys, text="1. Identidad Digital (.asc / .pem)")
+        notebook.add(self.tab_keys, text="1. Cargar Llave Privada (.asc)")
         notebook.add(self.tab_sender, text="2. Emisor (Alicia / Candy)")
         notebook.add(self.tab_receiver, text="3. Receptor (Betito)")
 
@@ -130,14 +139,14 @@ class MainApp(tk.Tk):
         self._build_tab_receiver()
 
     def _build_tab_keys(self):
-        f = ttk.LabelFrame(self.tab_keys, text=" Carga de Llave Privada ", padding=15)
+        f = ttk.LabelFrame(self.tab_keys, text=" Autenticación de Emisor ", padding=15)
         f.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
 
-        ttk.Label(f, text="Selecciona tu archivo .asc de llave privada para autenticarte:").pack(anchor=tk.W, pady=5)
+        ttk.Label(f, text="Selecciona tu archivo .asc de llave privada que ya tienes en tu computadora:").pack(anchor=tk.W, pady=5)
 
         btn_box = ttk.Frame(f)
         btn_box.pack(anchor=tk.W, pady=10)
-        ttk.Button(btn_box, text="📂 Seleccionar Archivo .asc / .pem", command=self.action_load_priv).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_box, text="📂 Seleccionar mi Llave Privada (.asc)", command=self.action_load_priv).pack(side=tk.LEFT, padx=5)
 
         self.lbl_priv_status = ttk.Label(f, text="Llave Privada: No cargada", foreground="red", font=("Segoe UI", 9, "bold"))
         self.lbl_priv_status.pack(anchor=tk.W, pady=5)
@@ -146,31 +155,30 @@ class MainApp(tk.Tk):
         self.txt_key_details.pack(fill=tk.BOTH, expand=True, pady=10)
 
     def action_load_priv(self):
-        path = filedialog.askopenfilename(filetypes=[("Llaves PGP/PEM", "*.asc;*.pem;*.key;*.*")])
+        path = filedialog.askopenfilename(filetypes=[("Llaves Privadas", "*.asc;*.key;*.*")])
         if not path:
             return
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
+                c = f.read()
 
-            if "PUBLIC KEY" in content and "PRIVATE KEY" not in content and "SECRET KEY" not in content:
-                messagebox.showerror("Archivo Incorrecto", "Has seleccionado una llave pública. Debes seleccionar tu archivo de llave PRIVADA.")
+            if "PUBLIC KEY" in c and "PRIVATE" not in c and "SECRET" not in c:
+                messagebox.showerror("Error", "Has seleccionado una llave pública. Debes seleccionar tu archivo de LLAVE PRIVADA.")
                 return
 
-            uid = OpenPGPParser.extract_uid(content)
-            self.identity_uid = uid
-            self.loaded_asc_text = content
+            uid, kid = OpenPGPAnalyzer.analyze(c)
+            self.priv_identity = uid
+            self.priv_key_id = kid
 
             self.lbl_priv_status.config(text=f"Llave Activa: {uid}", foreground="green")
             self.txt_key_details.delete("1.0", tk.END)
-            self.txt_key_details.insert(tk.END, "[✓] Llave privada cargada y validada correctamente.\n")
-            self.txt_key_details.insert(tk.END, f"    ➔ Identidad del Certificado: {uid}\n")
-            self.txt_key_details.insert(tk.END, f"    ➔ Archivo de origen: {os.path.basename(path)}\n\n")
-            self.txt_key_details.insert(tk.END, "--- ENCABEZADO PGP DETECTADO ---\n")
-            self.txt_key_details.insert(tk.END, content[:250] + "\n... [Contenido criptográfico verificado] ...\n")
+            self.txt_key_details.insert(tk.END, "[✓] Llave privada de GPG vinculada exitosamente.\n")
+            self.txt_key_details.insert(tk.END, f"    ➔ Titular del Certificado: {uid}\n")
+            self.txt_key_details.insert(tk.END, f"    ➔ Key ID Criptográfico: 0x{kid}\n")
+            self.txt_key_details.insert(tk.END, f"    ➔ Archivo origen: {os.path.basename(path)}\n")
             messagebox.showinfo("Éxito", f"Identidad comprobada:\n{uid}")
         except Exception as e:
-            messagebox.showerror("Error", f"Fallo al leer el archivo:\n{e}")
+            messagebox.showerror("Error", f"No se pudo cargar la llave privada:\n{e}")
 
     def _build_tab_sender(self):
         f = ttk.Frame(self.tab_sender, padding=15)
@@ -182,15 +190,15 @@ class MainApp(tk.Tk):
         opts = ttk.LabelFrame(f, text=" 1. Selección de Servicios Criptográficos ", padding=10)
         opts.pack(fill=tk.X, pady=5)
         ttk.Checkbutton(opts, text="Confidencialidad (Diffie-Hellman + AES-CBC)", variable=self.send_cipher).pack(side=tk.LEFT, padx=15)
-        ttk.Checkbutton(opts, text="Firma Digital (Autenticación, Integridad y No Repudio)", variable=self.send_sign).pack(side=tk.LEFT, padx=15)
+        ttk.Checkbutton(opts, text="Firma Digital (Autenticación, Integridad, No Repudio)", variable=self.send_sign).pack(side=tk.LEFT, padx=15)
 
         msg_box = ttk.LabelFrame(f, text=" 2. Mensaje en Claro (m) ", padding=10)
         msg_box.pack(fill=tk.X, pady=5)
         self.txt_sender_msg = ttk.Entry(msg_box, font=("Segoe UI", 10))
-        self.txt_sender_msg.insert(0, "Mensaje secreto y firmado para Betito.")
+        self.txt_sender_msg.insert(0, "Mensaje auténtico y confidencial para Betito.")
         self.txt_sender_msg.pack(fill=tk.X)
 
-        ttk.Button(f, text="🔒 Ejecutar y Guardar Archivo Criptográfico para Drive", command=self.action_send).pack(pady=10)
+        ttk.Button(f, text="🔒 Cifrar / Firmar y Guardar Archivo para Drive", command=self.action_send).pack(pady=10)
 
         log_box = ttk.LabelFrame(f, text=" Bitácora del Emisor ", padding=10)
         log_box.pack(fill=tk.BOTH, expand=True, pady=5)
@@ -206,14 +214,18 @@ class MainApp(tk.Tk):
             messagebox.showwarning("Error", "Selecciona al menos un servicio.")
             return
 
-        if do_s and not self.identity_uid:
-            messagebox.showerror("Error", "Debes cargar tu llave privada en la Pestaña 1 para firmar.")
+        if do_s and not self.priv_identity:
+            messagebox.showerror("Error", "Carga tu llave privada en la Pestaña 1 para firmar.")
             return
 
         msg_bytes = self.txt_sender_msg.get().strip().encode('utf-8')
+        if not msg_bytes:
+            messagebox.showwarning("Error", "El mensaje no puede estar vacío.")
+            return
+
         packet = {"cipher_active": do_c, "sign_active": do_s}
 
-        # 1. Confidencialidad
+        # 1. Confidencialidad (Diffie-Hellman + AES-CBC)
         if do_c:
             self.txt_sender_log.insert(tk.END, "[+] Servicio: CONFIDENCIALIDAD activado.\n")
             a, Ka = CryptoEngine.generate_dh_pair()
@@ -230,38 +242,36 @@ class MainApp(tk.Tk):
             packet["dh_Kc"] = str(Kc)
             packet["dh_d_simulated"] = str(d)
             packet["payload"] = base64.b64encode(ciphertext).decode()
-            self.txt_sender_log.insert(tk.END, "    - Diffie-Hellman: Ka y Kc intercambiados. K e IV derivados.\n")
+            self.txt_sender_log.insert(tk.END, "    - Diffie-Hellman: Secretos K e IV acordados matemáticamente.\n")
             self.txt_sender_log.insert(tk.END, f"    - AES-CBC: Mensaje cifrado ({len(ciphertext)} bytes).\n")
         else:
             packet["payload"] = base64.b64encode(msg_bytes).decode()
-            self.txt_sender_log.insert(tk.END, "[i] Texto en claro sin cifrado.\n")
+            self.txt_sender_log.insert(tk.END, "[i] Texto en claro sin cifrar.\n")
 
         # 2. Firma Digital
         if do_s:
             self.txt_sender_log.insert(tk.END, "[+] Servicios: AUTENTICACIÓN, INTEGRIDAD Y NO REPUDIO activados.\n")
-            # Firma con SHA-256
-            sig = self._internal_priv.sign(
+            sig = self.internal_priv.sign(
                 msg_bytes,
                 asym_padding.PSS(asym_padding.MGF1(hashes.SHA256()), asym_padding.PSS.MAX_LENGTH),
                 hashes.SHA256()
             )
             packet["signature"] = base64.b64encode(sig).decode()
-            packet["claimed_author"] = self.identity_uid
-            packet["pub_cert_b64"] = base64.b64encode(
-                self._internal_pub.public_bytes(
-                    serialization.Encoding.PEM,
-                    serialization.PublicFormat.SubjectPublicKeyInfo
-                )
+            packet["author_uid"] = self.priv_identity
+            packet["key_id"] = self.priv_key_id
+            packet["signer_pub_pem"] = self.internal_pub.public_bytes(
+                serialization.Encoding.PEM,
+                serialization.PublicFormat.SubjectPublicKeyInfo
             ).decode()
-            self.txt_sender_log.insert(tk.END, f"    - Autor firmante: {self.identity_uid}\n")
-            self.txt_sender_log.insert(tk.END, "    - Firma digital RSA + SHA-256 adjuntada al paquete.\n")
+            self.txt_sender_log.insert(tk.END, f"    - Firma digital generada por: {self.priv_identity}\n")
+            self.txt_sender_log.insert(tk.END, f"    - Vinculada al Key ID: 0x{self.priv_key_id}\n")
 
-        path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("Paquete Criptográfico", "*.json")])
+        path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("Paquete JSON", "*.json")])
         if path:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(packet, f, indent=2)
             self.txt_sender_log.insert(tk.END, f"\n[✓] Paquete guardado para Google Drive: {path}\n")
-            messagebox.showinfo("Listo", "Archivo generado con éxito.")
+            messagebox.showinfo("Listo", "Archivo generado para subir a Google Drive.")
 
     def _build_tab_receiver(self):
         f = ttk.Frame(self.tab_receiver, padding=15)
@@ -269,11 +279,11 @@ class MainApp(tk.Tk):
 
         load_box = ttk.LabelFrame(f, text=" 1. Archivo Descargado de la Nube (x, y, z) ", padding=10)
         load_box.pack(fill=tk.X, pady=5)
-        ttk.Button(load_box, text="📂 Seleccionar Archivo Local", command=self.action_load_file).pack(side=tk.LEFT, padx=5)
+        ttk.Button(load_box, text="📂 Seleccionar Archivo Descargado", command=self.action_load_file).pack(side=tk.LEFT, padx=5)
         self.lbl_cloud_file = ttk.Label(load_box, text="Ningún archivo seleccionado", foreground="gray")
         self.lbl_cloud_file.pack(side=tk.LEFT, padx=10)
 
-        web_box = ttk.LabelFrame(f, text=" 2. Llave Pública del Autor (.asc / .pem) ", padding=10)
+        web_box = ttk.LabelFrame(f, text=" 2. Llave Pública del Autor (.asc) [Descarga Web en Vivo] ", padding=10)
         web_box.pack(fill=tk.X, pady=5)
 
         url_row = ttk.Frame(web_box)
@@ -284,7 +294,7 @@ class MainApp(tk.Tk):
         self.txt_pub_url.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         ttk.Button(url_row, text="🌐 Descargar de la Web", command=self.action_download_web_pub).pack(side=tk.LEFT, padx=5)
 
-        ttk.Button(web_box, text="📂 O cargar llave pública desde archivo local", command=self.action_load_local_pub).pack(anchor=tk.W, padx=5, pady=3)
+        ttk.Button(web_box, text="📂 O cargar llave pública .asc desde archivo local", command=self.action_load_local_pub).pack(anchor=tk.W, padx=5, pady=3)
         self.lbl_pub_status = ttk.Label(web_box, text="Llave pública: No cargada", foreground="red")
         self.lbl_pub_status.pack(anchor=tk.W, padx=5)
 
@@ -304,23 +314,20 @@ class MainApp(tk.Tk):
                 with open(path, "r", encoding="utf-8") as f:
                     self.loaded_packet = json.load(f)
                 self.lbl_cloud_file.config(text=os.path.basename(path), foreground="black")
+                messagebox.showinfo("Cargado", f"Archivo seleccionado: {os.path.basename(path)}")
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo leer el archivo: {e}")
 
     def action_download_web_pub(self):
-        import requests
         url = self.txt_pub_url.get().strip()
         if not url:
-            messagebox.showwarning("Error", "Ingresa la URL.")
+            messagebox.showwarning("Error", "Introduce la URL de la llave pública.")
             return
         try:
             r = requests.get(url, timeout=5)
             r.raise_for_status()
-            uid = OpenPGPParser.extract_uid(r.text)
-            self.pub_identity = uid
-            self.pub_asc_text = r.text
-            self.lbl_pub_status.config(text=f"Llave web descargada: {uid}", foreground="green")
-            messagebox.showinfo("Éxito", f"Llave pública descargada de la Web:\n{uid}")
+            self._set_pub_key(r.text)
+            messagebox.showinfo("Éxito", f"Llave pública descargada:\n{self.pub_identity}")
         except Exception as e:
             messagebox.showerror("Error", f"Fallo al descargar de la web:\n{e}")
 
@@ -329,14 +336,16 @@ class MainApp(tk.Tk):
         if path:
             try:
                 with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                    text = f.read()
-                uid = OpenPGPParser.extract_uid(text)
-                self.pub_identity = uid
-                self.pub_asc_text = text
-                self.lbl_pub_status.config(text=f"Llave local cargada: {uid}", foreground="green")
-                messagebox.showinfo("Éxito", f"Llave pública cargada:\n{uid}")
+                    self._set_pub_key(f.read())
+                messagebox.showinfo("Éxito", f"Llave pública cargada:\n{self.pub_identity}")
             except Exception as e:
                 messagebox.showerror("Error", f"Fallo al leer la llave: {e}")
+
+    def _set_pub_key(self, text):
+        uid, kid = OpenPGPAnalyzer.analyze(text)
+        self.pub_identity = uid
+        self.pub_key_id = kid
+        self.lbl_pub_status.config(text=f"Llave Pública cargada: {uid} [0x{kid[:8]}]", foreground="green")
 
     def action_decrypt_verify(self):
         self.txt_receiver_log.delete("1.0", tk.END)
@@ -345,14 +354,20 @@ class MainApp(tk.Tk):
             return
 
         p = self.loaded_packet
-        payload_bytes = base64.b64decode(p["payload"])
         decrypted_m = None
 
         self.txt_receiver_log.insert(tk.END, "========================================================\n")
-        self.txt_receiver_log.insert(tk.END, "           VERIFICACIÓN EN RECEPTOR (BETITO)            \n")
+        self.txt_receiver_log.insert(tk.END, "           PROCESAMIENTO EN RECEPTOR (BETITO)           \n")
         self.txt_receiver_log.insert(tk.END, "========================================================\n")
 
-        # 1. Descifrado
+        # 1. DESCIFRADO
+        try:
+            payload_bytes = base64.b64decode(p["payload"])
+        except Exception:
+            self.txt_receiver_log.insert(tk.END, "[X] FALLO DE INTEGRIDAD: El archivo fue alterado.\n")
+            messagebox.showerror("Integridad Rota", "El archivo fue adulterado en la nube.")
+            return
+
         if p.get("cipher_active", False):
             try:
                 Ka = int(p["dh_Ka"])
@@ -364,28 +379,34 @@ class MainApp(tk.Tk):
                 iv_session = CryptoEngine.compute_dh_key(Kc, d, 16)
 
                 decrypted_m = CryptoEngine.decrypt_aes_cbc(payload_bytes, k_session, iv_session)
-                self.txt_receiver_log.insert(tk.END, "[✓] CONFIDENCIALIDAD: Descifrado Diffie-Hellman + AES exitoso.\n")
+                self.txt_receiver_log.insert(tk.END, "[✓] CONFIDENCIALIDAD: Descifrado Diffie-Hellman + AES-CBC exitoso.\n")
             except Exception as e:
                 self.txt_receiver_log.insert(tk.END, f"[X] Error al descifrar: {e}\n")
-                messagebox.showerror("Fallo de Descifrado", "No se pudo descifrar el mensaje.")
+                messagebox.showerror("Fallo de Descifrado", "No se pudo descifrar el criptograma.")
                 return
         else:
             decrypted_m = payload_bytes
             self.txt_receiver_log.insert(tk.END, "[i] Mensaje en texto claro.\n")
 
-        # 2. Verificación de Firma
+        # 2. VERIFICACIÓN CRIPTOGRÁFICA
         if p.get("sign_active", False):
             if not self.pub_identity:
-                messagebox.showwarning("Falta Llave", "Descarga de la web la llave pública del autor.")
+                messagebox.showwarning("Falta Llave", "Descarga o carga la llave pública .asc del presunto autor.")
                 return
 
-            claimed = p.get("claimed_author", "Desconocido")
+            author_packet = p.get("author_uid", "")
+            kid_packet = p.get("key_id", "")
             raw_sig = base64.b64decode(p.get("signature", ""))
-            pub_pem_bytes = base64.b64decode(p.get("pub_cert_b64", ""))
+            signer_pem = p.get("signer_pub_pem", "")
 
+            # A. Verificación de identidad: ¿La llave pública cargada por Betito es la del autor del archivo?
+            key_id_match = (self.pub_key_id == kid_packet)
+
+            # B. Verificación matemática de integridad del mensaje
+            math_integrity = False
             try:
-                pub_key = serialization.load_pem_public_key(pub_pem_bytes, backend=default_backend())
-                pub_key.verify(
+                pub_obj = serialization.load_pem_public_key(signer_pem.encode('utf-8'), backend=default_backend())
+                pub_obj.verify(
                     raw_sig,
                     decrypted_m,
                     asym_padding.PSS(asym_padding.MGF1(hashes.SHA256()), asym_padding.PSS.MAX_LENGTH),
@@ -395,22 +416,24 @@ class MainApp(tk.Tk):
             except Exception:
                 math_integrity = False
 
-            # Comparación de autoría
-            author_match = (claimed == self.pub_identity)
-
-            if math_integrity and author_match:
+            if key_id_match and math_integrity:
                 self.txt_receiver_log.insert(tk.END, "[✓] VERIFICACIÓN EXITOSA (Firma válida = )\n")
                 self.txt_receiver_log.insert(tk.END, f"    ➔ AUTOR CONFIRMADO: {self.pub_identity}\n")
-                self.txt_receiver_log.insert(tk.END, "    ➔ INTEGRIDAD: El mensaje no ha sufrido ninguna modificación.\n")
-                self.txt_receiver_log.insert(tk.END, "    ➔ NO REPUDIO: Vinculación absoluta con el firmante.\n")
-                messagebox.showinfo("Verificación Válida", f"Autor confirmado: {self.pub_identity}\nIntegridad garantizada.")
+                self.txt_receiver_log.insert(tk.END, f"    ➔ KEY ID VALIDADO: 0x{self.pub_key_id}\n")
+                self.txt_receiver_log.insert(tk.END, "    ➔ INTEGRIDAD: Mensaje auténtico, sin alteraciones.\n")
+                self.txt_receiver_log.insert(tk.END, "    ➔ NO REPUDIO: Vinculación matemática demostrada.\n")
+                messagebox.showinfo("Verificación Positiva", f"¡Autor Confirmado!\nEl archivo pertenece a:\n{self.pub_identity}")
             else:
                 self.txt_receiver_log.insert(tk.END, "[X] VERIFICACIÓN FALLIDA (Firma inválida != )\n")
+                if not key_id_match:
+                    self.txt_receiver_log.insert(tk.END, f"    ➔ ALERTA DE AUTORÍA: La llave probada (0x{self.pub_key_id[:8]}) NO corresponde al autor de este archivo (0x{kid_packet[:8]}).\n")
                 if not math_integrity:
-                    self.txt_receiver_log.insert(tk.END, "    ➔ ALERTA DE INTEGRIDAD: El mensaje fue manipulado en la nube.\n")
-                if not author_match:
-                    self.txt_receiver_log.insert(tk.END, f"    ➔ ALERTA DE AUTORÍA: La llave pública ({self.pub_identity}) no corresponde al autor real ({claimed}).\n")
-                messagebox.showerror("Fallo de Verificación", "¡Alerta! La verificación falló. Integridad violada o autor no reconocido.")
+                    self.txt_receiver_log.insert(tk.END, "    ➔ ALERTA DE INTEGRIDAD: El mensaje fue manipulado en la nube (el hash no coincide con la firma).\n")
+                messagebox.showerror(
+                    "Fallo de Verificación",
+                    f"La verificación ha FALLADO.\n\n"
+                    f"La llave pública de '{self.pub_identity}' NO firmó este mensaje, o el archivo fue manipulado en la nube."
+                )
         else:
             self.txt_receiver_log.insert(tk.END, "[i] Mensaje sin firma digital.\n")
 
