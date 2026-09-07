@@ -574,10 +574,8 @@ class AplicacionHibrida(tk.Tk):
         fila = ttk.Frame(llav)
         fila.pack(fill=tk.X)
         self.url_autor = ttk.Entry(fila)
-        self.url_autor.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(fila, text="Descargar de la web", command=self.agregar_autor_web).pack(
-            side=tk.LEFT, padx=4
-        )
+       
+      
         ttk.Button(llav, text="Agregar desde archivo local .asc", command=self.agregar_autor_local).pack(
             anchor=tk.W, pady=3
         )
