@@ -1,0 +1,8 @@
+# Practica: Criptografia Hibrida - ESCOM/IPN
+# Instalar con:  pip install -r requirements.txt
+#
+# tkinter no se lista aqui: viene incluido con la instalacion estandar de Python
+# en Windows y macOS. En Debian/Ubuntu: sudo apt install python3-tk
+
+cryptography>=42.0
+requests>=2.31
