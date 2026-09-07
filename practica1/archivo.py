@@ -226,8 +226,7 @@ class AplicacionHibrida(tk.Tk):
         if not ruta:
             return
         try:
-            with open(ruta, "r", encoding="utf-8", errors="ignore") as fh:
-                texto = fh.read()
+            texto = pgp.leer_texto(ruta)
         except OSError as exc:
             messagebox.showerror("Error", f"No se pudo leer el archivo:\n{exc}")
             return
@@ -388,9 +387,8 @@ class AplicacionHibrida(tk.Tk):
         ruta = filedialog.askopenfilename(filetypes=[("Texto", "*.txt"), ("Todos", "*.*")])
         if not ruta:
             return
-        with open(ruta, "r", encoding="utf-8", errors="replace") as fh:
-            self.txt_mensaje.delete("1.0", tk.END)
-            self.txt_mensaje.insert("1.0", fh.read())
+        self.txt_mensaje.delete("1.0", tk.END)
+        self.txt_mensaje.insert("1.0", pgp.leer_texto(ruta))
 
     def _fijar_dest_asc(self, texto: str, origen: str):
         llave = pgp.load_public_key(texto)
@@ -421,8 +419,7 @@ class AplicacionHibrida(tk.Tk):
         if not ruta:
             return
         try:
-            with open(ruta, "r", encoding="utf-8", errors="ignore") as fh:
-                self._fijar_dest_asc(fh.read(), os.path.basename(ruta))
+            self._fijar_dest_asc(pgp.leer_texto(ruta), os.path.basename(ruta))
         except (pgp.PGPError, OSError) as exc:
             self.log_emisor.error(f"Llave publica invalida: {exc}")
             messagebox.showerror("Error", str(exc))
@@ -469,8 +466,7 @@ class AplicacionHibrida(tk.Tk):
         if not ruta:
             return
         try:
-            with open(ruta, "r", encoding="utf-8") as fh:
-                self._fijar_dest_dh(fh.read(), os.path.basename(ruta))
+            self._fijar_dest_dh(pgp.leer_texto(ruta), os.path.basename(ruta))
         except protocolo.ErrorProtocolo as exc:
             self.log_emisor.error(str(exc))
             messagebox.showerror("Parametros DH rechazados", str(exc))
@@ -652,8 +648,7 @@ class AplicacionHibrida(tk.Tk):
         )
         for ruta in rutas:
             try:
-                with open(ruta, "r", encoding="utf-8", errors="ignore") as fh:
-                    self._agregar_al_llavero(fh.read(), os.path.basename(ruta))
+                self._agregar_al_llavero(pgp.leer_texto(ruta), os.path.basename(ruta))
             except (pgp.PGPError, OSError) as exc:
                 self.log_receptor.error(f"{os.path.basename(ruta)}: {exc}")
 

@@ -77,8 +77,43 @@ def crc24(data: bytes) -> int:
     return crc & 0x00FFFFFF
 
 
+def leer_texto(ruta: str) -> str:
+    """Lee un archivo de texto detectando su codificacion.
+
+    GnuPG escribe los .asc en ASCII, pero si alguien los genera con la
+    redireccion '>' de Windows PowerShell 5.1 el archivo sale en UTF-16, y leerlo
+    como UTF-8 produce un texto lleno de caracteres nulos que no se parece a un
+    bloque ASCII-armor. Esta funcion reconoce ese caso y varios mas.
+    """
+    with open(ruta, "rb") as fh:
+        crudo = fh.read()
+
+    if crudo.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return crudo.decode("utf-16")
+    if crudo.startswith(b"\xef\xbb\xbf"):
+        return crudo.decode("utf-8-sig")
+
+    # Sin BOM: muchos bytes nulos delatan un UTF-16 de todas formas.
+    muestra = crudo[:512]
+    if muestra.count(0) > len(muestra) // 4:
+        for codificacion in ("utf-16-le", "utf-16-be"):
+            try:
+                texto = crudo.decode(codificacion)
+                if "-----BEGIN" in texto or texto.lstrip().startswith("{"):
+                    return texto
+            except UnicodeDecodeError:
+                continue
+
+    return crudo.decode("utf-8", errors="replace")
+
+
 def dearmor(text: str) -> bytes:
     """Convierte un bloque -----BEGIN PGP ...----- en su payload binario."""
+    # Red de seguridad: un armor nunca contiene caracteres nulos. Si llegaron
+    # aqui es que el texto venia de un UTF-16 mal decodificado.
+    if "\x00" in text:
+        text = text.replace("\x00", "")
+
     lines = text.splitlines()
     start = end = None
     for i, line in enumerate(lines):

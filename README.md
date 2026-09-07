@@ -542,6 +542,7 @@ Detalle de notación: el diagrama llama `n` al módulo primo; el código lo llam
 | Síntoma | Causa y solución |
 |---|---|
 | *El bloque de llave está INCOMPLETO* | El `.asc` se copió o exportó a medias. Reexporta con `gpg --output llave.asc --armor --export-secret-keys TU_CORREO` |
+| *El archivo no contiene un bloque ASCII‑armor* | El `.asc` está en UTF‑16 (típico de exportar con `>` en PowerShell). **El programa ya lo detecta y lo lee solo**; si aun así falla, reexporta con `--output` |
 | *Ese archivo no contiene una llave PRIVADA* | Seleccionaste la pública. Necesitas la de `--export-secret-keys` |
 | *Frase de paso incorrecta* | El material privado no se pudo descifrar. Revisa la contraseña de tu llave GPG |
 | *La llave no es RSA (algoritmo 22)* | Es Ed25519. Genera una nueva con `gpg --full-generate-key` eligiendo RSA |

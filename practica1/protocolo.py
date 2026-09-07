@@ -42,7 +42,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.asymmetric import utils as asym_utils
 
 import motor
-from pgp import PGPKey
+from pgp import PGPKey, leer_texto
 
 FORMATO_PAQUETE = "CRIPTO-HIBRIDA-DH-v1"
 FORMATO_DHPUB = "PARAMETROS-DH-PUBLICOS-v1"
@@ -230,8 +230,8 @@ def guardar_json(ruta: str, datos: Dict) -> None:
 
 
 def cargar_json(ruta: str) -> Dict:
-    with open(ruta, "r", encoding="utf-8") as fh:
-        return json.load(fh)
+    # leer_texto detecta UTF-16, tal como con las llaves .asc.
+    return json.loads(leer_texto(ruta))
 
 
 class Resultado:

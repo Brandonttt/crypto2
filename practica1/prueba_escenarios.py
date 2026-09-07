@@ -38,10 +38,8 @@ def titulo(t: str) -> None:
 
 
 def cargar(carpeta: str, nombre: str):
-    pub = pgp.load_public_key(
-        open(os.path.join(carpeta, f"{nombre}_pub.asc"), encoding="utf-8").read()
-    )
-    texto = open(os.path.join(carpeta, f"{nombre}_priv.asc"), encoding="utf-8").read()
+    pub = pgp.load_public_key(pgp.leer_texto(os.path.join(carpeta, f"{nombre}_pub.asc")))
+    texto = pgp.leer_texto(os.path.join(carpeta, f"{nombre}_priv.asc"))
     frase = os.environ.get(f"PASS_{nombre.upper()}")
     if frase is None and pgp.needs_passphrase(texto):
         import getpass
