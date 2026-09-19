@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Calculadora de Curvas Elípticas en 𝔽ₚ</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      margin: 2rem;
+      background: #0f172a;
+      color: #f8fafc;
+    }
+    h1 {
+      margin-bottom: 1.5rem;
+      font-size: 1.8rem;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 340px 1fr;
+      gap: 2rem;
+    }
+    .card {
+      background: #1e293b;
+      padding: 1.25rem;
+      border-radius: 8px;
+      margin-bottom: 1rem;
+      border: 1px solid #334155;
+    }
+    .card h3 {
+      margin-top: 0;
+      margin-bottom: 1rem;
+      font-size: 1.1rem;
+      color: #94a3b8;
+    }
+    label {
+      display: block;
+      margin-bottom: 0.75rem;
+      font-size: 0.9rem;
+      color: #cbd5e1;
+    }
+    input, select, button {
+      width: 100%;
+      padding: 0.6rem;
+      margin-top: 0.35rem;
+      border-radius: 6px;
+      border: 1px solid #475569;
+      background: #334155;
+      color: #fff;
+      box-sizing: border-box;
+      font-size: 0.95rem;
+    }
+    input:focus, select:focus {
+      outline: 2px solid #3b82f6;
+      border-color: transparent;
+    }
+    button {
+      background: #2563eb;
+      cursor: pointer;
+      font-weight: 600;
+      border: none;
+      margin-top: 0.5rem;
+      transition: background 0.2s;
+    }
+    button:hover {
+      background: #1d4ed8;
+    }
+    .status-badge {
+      display: inline-block;
+      padding: 0.3rem 0.6rem;
+      border-radius: 4px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      margin-top: 0.6rem;
+    }
+    .valid {
+      background: #166534;
+      color: #bbf7d0;
+    }
+    .invalid {
+      background: #991b1b;
+      color: #fecaca;
+    }
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 0.4rem 0;
+      border-bottom: 1px solid #334155;
+      font-size: 0.95rem;
+    }
+    .stat-row:last-child {
+      border-bottom: none;
+    }
+    .results-container {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+    .placeholder-msg {
+      color: #64748b;
+      font-style: italic;
+      padding: 1.5rem 1rem;
+      text-align: center;
+    }
+    .alert-banner {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.75rem 1rem;
+      border-radius: 6px;
+      font-weight: 500;
+      font-size: 0.95rem;
+    }
+    .alert-success {
+      background: rgba(22, 101, 52, 0.25);
+      border: 1px solid #166534;
+      color: #4ade80;
+    }
+    .alert-info {
+      background: rgba(30, 58, 138, 0.25);
+      border: 1px solid #1e40af;
+      color: #60a5fa;
+    }
+    .alert-danger {
+      background: rgba(185, 28, 28, 0.25);
+      border: 1px solid #b91c1c;
+      color: #f87171;
+    }
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 0.75rem;
+    }
+    .metric-card {
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      padding: 0.75rem;
+    }
+    .metric-label {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #94a3b8;
+      margin-bottom: 0.35rem;
+    }
+    .metric-value {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: #f8fafc;
+      font-family: ui-monospace, monospace;
+    }
+    .equation-box {
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      padding: 0.85rem;
+      font-family: ui-monospace, monospace;
+      color: #38bdf8;
+      font-size: 1.05rem;
+      text-align: center;
+      letter-spacing: 0.02em;
+    }
+  </style>
+</head>
+<body>
+  <h1>Calculadora de Curvas Elípticas en 𝔽ₚ</h1>
+
+  <div class="grid">
+    <div>
+      <div class="card">
+        <h3>1. Parámetros de la Curva</h3>
+        <label>Parámetro a: <input type="number" id="inputA" value="-5"></label>
+        <label>Parámetro b: <input type="number" id="inputB" value="6"></label>
+        <label>Módulo primo (p): <input type="number" id="inputP" value="11"></label>
+        <button id="btnValidate">Cargar y Validar Curva</button>
+        <div id="validationResult"></div>
+      </div>
+
+      <div class="card">
+        <h3>2. Suma de Puntos (P + Q)</h3>
+        <label>Punto P: <select id="selectP"></select></label>
+        <label>Punto Q: <select id="selectQ"></select></label>
+        <button id="btnAdd">Calcular P + Q</button>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <h3>Estado y Resultados</h3>
+        <div id="outputConsole" class="results-container">
+          <div class="placeholder-msg">Ingresa los parámetros y pulsa "Cargar y Validar Curva"...</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Información del Grupo</h3>
+        <div class="stat-row">
+          <span>Orden del grupo #E(𝔽ₚ):</span>
+          <strong id="groupOrder">-</strong>
+        </div>
+        <div class="stat-row">
+          <span>Total de puntos (con 𝒪):</span>
+          <strong id="totalPoints">-</strong>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
