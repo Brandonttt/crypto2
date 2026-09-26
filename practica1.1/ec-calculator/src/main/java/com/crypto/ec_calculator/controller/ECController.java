@@ -6,11 +6,10 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.math.BigInteger;
-import java.util.List;
 
 @RestController
 @RequestMapping("/api/ec")
-@CrossOrigin(origins = "*") // Ajustar según el origen del frontend
+@CrossOrigin(origins = "*")
 public class ECController {
 
     private final ECService ecService;
@@ -24,31 +23,37 @@ public class ECController {
         return ResponseEntity.ok(ecService.validateCurve(params));
     }
 
-    @GetMapping("/points")
-    public ResponseEntity<List<PointDTO>> getPoints(
+    @GetMapping("/analyze")
+    public ResponseEntity<AnalysisResponse> analyze(
             @RequestParam BigInteger a,
             @RequestParam BigInteger b,
             @RequestParam BigInteger p) {
-        return ResponseEntity.ok(ecService.getAllPoints(new CurveParams(a, b, p)));
+        return ResponseEntity.ok(ecService.analyzeGroup(new CurveParams(a, b, p)));
     }
 
     @PostMapping("/add")
-    public ResponseEntity<AddPointsResponse> addPoints(@RequestBody AddPointsRequest request) {
-        return ResponseEntity.ok(ecService.addPoints(request));
+    public ResponseEntity<OperationResponse> add(@RequestBody OperationRequest req) {
+        return ResponseEntity.ok(ecService.addPoints(req.curve(), req.p1(), req.p2()));
     }
 
     @PostMapping("/multiply")
-    public ResponseEntity<MultiplyResponse> multiply(@RequestBody MultiplyRequest request) {
-        return ResponseEntity.ok(ecService.multiply(request));
+    public ResponseEntity<ScalarMultiplyResponse> multiply(@RequestBody ScalarMultiplyRequest req) {
+        return ResponseEntity.ok(ecService.multiply(req.curve(), req.point(), req.k()));
     }
 
-    @GetMapping("/order")
-    public ResponseEntity<GroupOrderResponse> getGroupOrder(
+    @GetMapping("/table/addition")
+    public ResponseEntity<AdditionTableResponse> additionTable(
             @RequestParam BigInteger a,
             @RequestParam BigInteger b,
             @RequestParam BigInteger p) {
-        List<PointDTO> points = ecService.getAllPoints(new CurveParams(a, b, p));
-        // +1 contando el punto al infinito
-        return ResponseEntity.ok(new GroupOrderResponse(points.size() + 1, points));
+        return ResponseEntity.ok(ecService.getAdditionTable(new CurveParams(a, b, p)));
+    }
+
+    @GetMapping("/table/multiplication")
+    public ResponseEntity<MultiplicationTableResponse> multiplicationTable(
+            @RequestParam BigInteger a,
+            @RequestParam BigInteger b,
+            @RequestParam BigInteger p) {
+        return ResponseEntity.ok(ecService.getMultiplicationTable(new CurveParams(a, b, p)));
     }
 }

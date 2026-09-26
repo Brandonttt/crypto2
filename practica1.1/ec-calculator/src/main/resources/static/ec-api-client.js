@@ -4,42 +4,33 @@ export class EllipticCurveAPI {
   static async #request(endpoint, options = {}) {
     try {
       const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-        headers: {
-          'Content-Type': 'application/json',
-          ...options.headers,
-        },
+        headers: { 'Content-Type': 'application/json', ...options.headers },
         ...options,
       });
-
       if (!response.ok) {
-        const errorBody = await response.text();
-        throw new Error(errorBody || `HTTP ${response.status}: ${response.statusText}`);
+        const errorText = await response.text();
+        throw new Error(errorText || `Error HTTP ${response.status}`);
       }
-
       return await response.json();
     } catch (err) {
-      console.error(`Error invocando ${endpoint}:`, err);
+      console.error(`Fallo API [${endpoint}]:`, err);
       throw err;
     }
   }
 
-  static async validateCurve(a, b, p) {
+  static validateCurve(a, b, p) {
     return this.#request('/validate', {
       method: 'POST',
       body: JSON.stringify({ a: a.toString(), b: b.toString(), p: p.toString() }),
     });
   }
 
-  static async getPoints(a, b, p) {
-    const query = new URLSearchParams({
-      a: a.toString(),
-      b: b.toString(),
-      p: p.toString(),
-    });
-    return this.#request(`/points?${query.toString()}`);
+  static analyzeGroup(a, b, p) {
+    const q = new URLSearchParams({ a: a.toString(), b: b.toString(), p: p.toString() });
+    return this.#request(`/analyze?${q.toString()}`);
   }
 
-  static async addPoints(curve, p1, p2) {
+  static addPoints(curve, p1, p2) {
     return this.#request('/add', {
       method: 'POST',
       body: JSON.stringify({
@@ -50,7 +41,7 @@ export class EllipticCurveAPI {
     });
   }
 
-  static async multiplyPoint(curve, point, k) {
+  static multiplyPoint(curve, point, k) {
     return this.#request('/multiply', {
       method: 'POST',
       body: JSON.stringify({
@@ -61,12 +52,13 @@ export class EllipticCurveAPI {
     });
   }
 
-  static async getGroupOrder(a, b, p) {
-    const query = new URLSearchParams({
-      a: a.toString(),
-      b: b.toString(),
-      p: p.toString(),
-    });
-    return this.#request(`/order?${query.toString()}`);
+  static getAdditionTable(a, b, p) {
+    const q = new URLSearchParams({ a: a.toString(), b: b.toString(), p: p.toString() });
+    return this.#request(`/table/addition?${q.toString()}`);
+  }
+
+  static getMultiplicationTable(a, b, p) {
+    const q = new URLSearchParams({ a: a.toString(), b: b.toString(), p: p.toString() });
+    return this.#request(`/table/multiplication?${q.toString()}`);
   }
 }

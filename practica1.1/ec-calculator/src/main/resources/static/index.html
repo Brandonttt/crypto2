@@ -4,204 +4,112 @@
   <meta charset="UTF-8">
   <title>Calculadora de Curvas Elípticas en 𝔽ₚ</title>
   <style>
-    body {
-      font-family: system-ui, -apple-system, sans-serif;
-      margin: 2rem;
-      background: #0f172a;
-      color: #f8fafc;
-    }
-    h1 {
-      margin-bottom: 1.5rem;
-      font-size: 1.8rem;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: 340px 1fr;
-      gap: 2rem;
-    }
-    .card {
-      background: #1e293b;
-      padding: 1.25rem;
-      border-radius: 8px;
-      margin-bottom: 1rem;
-      border: 1px solid #334155;
-    }
-    .card h3 {
-      margin-top: 0;
-      margin-bottom: 1rem;
-      font-size: 1.1rem;
-      color: #94a3b8;
-    }
-    label {
-      display: block;
-      margin-bottom: 0.75rem;
-      font-size: 0.9rem;
-      color: #cbd5e1;
-    }
-    input, select, button {
-      width: 100%;
-      padding: 0.6rem;
-      margin-top: 0.35rem;
-      border-radius: 6px;
-      border: 1px solid #475569;
-      background: #334155;
-      color: #fff;
-      box-sizing: border-box;
-      font-size: 0.95rem;
-    }
-    input:focus, select:focus {
-      outline: 2px solid #3b82f6;
-      border-color: transparent;
-    }
-    button {
-      background: #2563eb;
-      cursor: pointer;
-      font-weight: 600;
-      border: none;
-      margin-top: 0.5rem;
-      transition: background 0.2s;
-    }
-    button:hover {
-      background: #1d4ed8;
-    }
-    .status-badge {
-      display: inline-block;
-      padding: 0.3rem 0.6rem;
-      border-radius: 4px;
-      font-size: 0.85rem;
-      font-weight: 500;
-      margin-top: 0.6rem;
-    }
-    .valid {
-      background: #166534;
-      color: #bbf7d0;
-    }
-    .invalid {
-      background: #991b1b;
-      color: #fecaca;
-    }
-    .stat-row {
-      display: flex;
-      justify-content: space-between;
-      padding: 0.4rem 0;
-      border-bottom: 1px solid #334155;
-      font-size: 0.95rem;
-    }
-    .stat-row:last-child {
-      border-bottom: none;
-    }
-    .results-container {
-      display: flex;
-      flex-direction: column;
-      gap: 0.75rem;
-    }
-    .placeholder-msg {
-      color: #64748b;
-      font-style: italic;
-      padding: 1.5rem 1rem;
-      text-align: center;
-    }
-    .alert-banner {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.75rem 1rem;
-      border-radius: 6px;
-      font-weight: 500;
-      font-size: 0.95rem;
-    }
-    .alert-success {
-      background: rgba(22, 101, 52, 0.25);
-      border: 1px solid #166534;
-      color: #4ade80;
-    }
-    .alert-info {
-      background: rgba(30, 58, 138, 0.25);
-      border: 1px solid #1e40af;
-      color: #60a5fa;
-    }
-    .alert-danger {
-      background: rgba(185, 28, 28, 0.25);
-      border: 1px solid #b91c1c;
-      color: #f87171;
-    }
-    .metrics-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-      gap: 0.75rem;
-    }
-    .metric-card {
-      background: #0f172a;
-      border: 1px solid #334155;
-      border-radius: 6px;
-      padding: 0.75rem;
-    }
-    .metric-label {
-      font-size: 0.75rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: #94a3b8;
-      margin-bottom: 0.35rem;
-    }
-    .metric-value {
-      font-size: 1.1rem;
-      font-weight: 600;
-      color: #f8fafc;
-      font-family: ui-monospace, monospace;
-    }
-    .equation-box {
-      background: #0f172a;
-      border: 1px solid #334155;
-      border-radius: 6px;
-      padding: 0.85rem;
-      font-family: ui-monospace, monospace;
-      color: #38bdf8;
-      font-size: 1.05rem;
-      text-align: center;
-      letter-spacing: 0.02em;
-    }
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 1.5rem; background: #0f172a; color: #f8fafc; }
+    h1 { margin-bottom: 1.25rem; font-size: 1.7rem; }
+    .layout { display: grid; grid-template-columns: 360px 1fr; gap: 1.5rem; }
+    .card { background: #1e293b; padding: 1.2rem; border-radius: 8px; margin-bottom: 1rem; border: 1px solid #334155; }
+    .card h3 { margin-top: 0; margin-bottom: 0.8rem; font-size: 1.05rem; color: #94a3b8; }
+    label { display: block; margin-bottom: 0.6rem; font-size: 0.88rem; color: #cbd5e1; }
+    input, select, button { width: 100%; padding: 0.55rem; margin-top: 0.3rem; border-radius: 6px; border: 1px solid #475569; background: #334155; color: #fff; box-sizing: border-box; font-size: 0.92rem; }
+    input:focus, select:focus { outline: 2px solid #3b82f6; }
+    button { background: #2563eb; cursor: pointer; font-weight: 600; border: none; margin-top: 0.4rem; transition: background 0.2s; }
+    button:hover { background: #1d4ed8; }
+    button.secondary { background: #475569; }
+    button.secondary:hover { background: #334155; }
+    .status-badge { display: inline-block; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.82rem; font-weight: 500; margin-top: 0.5rem; }
+    .valid { background: #166534; color: #bbf7d0; }
+    .invalid { background: #991b1b; color: #fecaca; }
+    .results-container { display: flex; flex-direction: column; gap: 0.65rem; }
+    .alert-banner { display: flex; align-items: center; gap: 0.5rem; padding: 0.65rem 0.9rem; border-radius: 6px; font-size: 0.92rem; font-weight: 500; }
+    .alert-success { background: rgba(22, 101, 52, 0.3); border: 1px solid #166534; color: #4ade80; }
+    .alert-info { background: rgba(30, 58, 138, 0.3); border: 1px solid #1e40af; color: #60a5fa; }
+    .alert-danger { background: rgba(185, 28, 28, 0.3); border: 1px solid #b91c1c; color: #f87171; }
+    .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 0.6rem; }
+    .metric-card { background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 0.65rem; }
+    .metric-label { font-size: 0.72rem; text-transform: uppercase; color: #94a3b8; margin-bottom: 0.25rem; }
+    .metric-value { font-size: 1.05rem; font-weight: 600; color: #f8fafc; font-family: ui-monospace, monospace; }
+    .equation-box { background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 0.75rem; font-family: ui-monospace, monospace; color: #38bdf8; font-size: 1rem; text-align: center; }
+    .generators-box { max-height: 90px; overflow-y: auto; background: #0f172a; padding: 0.5rem; border-radius: 4px; border: 1px solid #334155; font-family: ui-monospace, monospace; font-size: 0.85rem; color: #a7f3d0; word-break: break-all; }
+    .table-wrapper { overflow-x: auto; max-height: 420px; border: 1px solid #334155; border-radius: 6px; margin-top: 0.8rem; background: #0f172a; }
+    table { width: 100%; border-collapse: collapse; font-family: ui-monospace, monospace; font-size: 0.82rem; text-align: center; }
+    th, td { border: 1px solid #334155; padding: 0.4rem 0.6rem; white-space: nowrap; }
+    th { background: #1e293b; color: #38bdf8; position: sticky; top: 0; z-index: 1; }
+    th.left-col { position: sticky; left: 0; z-index: 2; background: #1e293b; color: #cbd5e1; }
+    td:hover { background: #1e293b; }
+    .btn-group { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
   </style>
 </head>
 <body>
   <h1>Calculadora de Curvas Elípticas en 𝔽ₚ</h1>
 
-  <div class="grid">
+  <div class="layout">
+    <!-- Panel Izquierdo: Formularios -->
     <div>
       <div class="card">
         <h3>1. Parámetros de la Curva</h3>
         <label>Parámetro a: <input type="number" id="inputA" value="-5"></label>
         <label>Parámetro b: <input type="number" id="inputB" value="6"></label>
         <label>Módulo primo (p): <input type="number" id="inputP" value="11"></label>
-        <button id="btnValidate">Cargar y Validar Curva</button>
+        <button id="btnValidate">1. Validar y Cargar Curva</button>
         <div id="validationResult"></div>
       </div>
 
       <div class="card">
-        <h3>2. Suma de Puntos (P + Q)</h3>
+        <h3>2. Operaciones de Puntos</h3>
         <label>Punto P: <select id="selectP"></select></label>
         <label>Punto Q: <select id="selectQ"></select></label>
-        <button id="btnAdd">Calcular P + Q</button>
+        <div class="btn-group">
+          <button id="btnAdd">P + Q</button>
+          <button id="btnDouble" class="secondary">2P (Doblado)</button>
+        </div>
+
+        <hr style="border:0; border-top:1px solid #334155; margin:1rem 0;">
+
+        <label>Escalar k: <input type="number" id="inputK" value="3"></label>
+        <button id="btnMultiply">Calcular k · P</button>
+      </div>
+
+      <div class="card">
+        <h3>3. Tablas del Grupo</h3>
+        <button id="btnTableAdd" class="secondary">Ver Tabla de Suma (Cayley)</button>
+        <button id="btnTableMul" class="secondary" style="margin-top:0.4rem;">Ver Tabla Escalar (k · P)</button>
       </div>
     </div>
 
+    <!-- Panel Derecho: Salidas y Tablas -->
     <div>
       <div class="card">
         <h3>Estado y Resultados</h3>
         <div id="outputConsole" class="results-container">
-          <div class="placeholder-msg">Ingresa los parámetros y pulsa "Cargar y Validar Curva"...</div>
+          <div style="color:#64748b; font-style:italic; padding:1.5rem; text-align:center;">
+            Ingresa los parámetros y pulsa "Validar y Cargar Curva"...
+          </div>
         </div>
       </div>
 
       <div class="card">
-        <h3>Información del Grupo</h3>
-        <div class="stat-row">
-          <span>Orden del grupo #E(𝔽ₚ):</span>
-          <strong id="groupOrder">-</strong>
+        <h3>Estructura del Grupo y Generadores</h3>
+        <div class="metrics-grid" style="margin-bottom:0.75rem;">
+          <div class="metric-card">
+            <div class="metric-label">Cardinalidad #E(𝔽ₚ)</div>
+            <div class="metric-value" id="cardinalityVal">-</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Puntos Generadores</div>
+            <div class="metric-value" id="generatorsCount">-</div>
+          </div>
         </div>
-        <div class="stat-row">
-          <span>Total de puntos (con 𝒪):</span>
-          <strong id="totalPoints">-</strong>
-        </div>
+
+        <label>Todos los Puntos del Grupo (incluyendo 𝒪):</label>
+        <div class="generators-box" id="allPointsList" style="color: #38bdf8; margin-bottom: 0.8rem;">Ninguna curva cargada</div>
+
+        <label>Puntos Generadores (orden máximo):</label>
+        <div class="generators-box" id="generatorsList">Ninguna curva cargada</div>
+      </div>
+
+      <div class="card" id="tableCard" style="display:none;">
+        <h3 id="tableTitle">Tabla</h3>
+        <div class="table-wrapper" id="tableWrapper"></div>
       </div>
     </div>
   </div>
